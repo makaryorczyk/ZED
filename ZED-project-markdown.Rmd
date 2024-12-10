@@ -1,0 +1,628 @@
+---
+title: "Zaawansowana eksploracja - projekt"
+author: "Makary Orczyk"
+date: "2024-12-10"
+output: html_document
+---
+
+## 1. Code determining used libraries:
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(shiny)
+library(corrplot)
+library(plotly)
+library(caret)
+library(randomForest)
+
+```
+
+Used libraries:
+
+``` {r used_libraries, echo=FALSE} 
+libs <- c("ggplot2", "tidyr", "dplyr", "tibble", "reshape2", "plotly", "timechange", "ModelMetrics", "caret")
+
+print(cat("Libraries loaded:", paste(libs, collapse = ", ")))
+
+```
+
+## 2. Code ensuring reproducibility of results
+
+``` {r reproducibility} 
+
+set.seed(42)
+
+```
+
+
+## 3. Code loading the data
+
+``` {r loading_data, cache=TRUE} 
+setwd('/Users/makaryorczyk/Desktop/ZED-projekt')
+data <- read.csv("mp_batteries.csv")
+```
+
+
+## 4. Code processing missing values
+
+a) Checking how many NA values do we have
+
+``` {r na_values}
+print(data %>% summarise_all(~sum(is.na(.))))
+```
+
+b) Checking how many NaN values do we have
+``` {r nan_values} 
+print(data %>% summarise_all(~sum(is.nan(.))))
+```
+
+Since we do not have any missing values we do not require any additional raw processing.
+
+## 5. Summarizing the dataset and calculating the basic statistics
+
+Sample of the data.
+
+``` {r echo=FALSE}
+knitr::kable(head(data, 10)) 
+```
+
+Dimensions of the DataFrame
+``` {r echo=FALSE}
+dim(data)
+```
+Therefore, we are working with a dataset consisting of 17 columns/features, and 4351 data samples.
+
+We check how many data samples are unique, but assuming that we exclude the Battery.ID of the battery since it might be an unique identifier for each sample.
+``` {r echo=FALSE}
+df_subset <- data[, -1]
+cat("Number of unique rows:", nrow(unique(df_subset)), "\n")
+```
+Therefore we do not have any duplicate rows.
+
+## 6. Detailed attribute analysis.
+
+Consider data features.
+``` {r }
+colnames(data)
+```
+
+Analyze what types of features do we have.
+``` {r echo=FALSE}
+num_numerical <- sum(sapply(data, is.numeric))
+num_categorical <- sum(sapply(data, is.factor) | sapply(data, is.character))
+
+numerical_features <- names(data)[sapply(data, is.numeric)]
+categorical_features <- names(data)[sapply(data, is.factor) | sapply(data, is.character)]
+
+cat("# of Numerical features:", num_numerical, "\n")
+cat("Numerical features:\n", paste(numerical_features, collapse = ", "), "\n")
+cat("# of Categorical features:", num_categorical, "\n")
+cat("Categorical features:\n", paste(categorical_features, collapse = ", "), "\n")
+
+```
+
+Since the Battery.ID is the row identifier we exclude it from further analysis.
+
+``` {r echo=FALSE}
+data <- data[, -1]
+```
+
+We show the basic statistics of the numerical features
+
+``` {r numerical_stats, echo=FALSE}
+options(scipen = 999)
+
+stats <- data %>%
+  select(where(is.numeric)) %>%
+  summarise(across(everything(), list(
+    min = ~min(., na.rm = TRUE),
+    max = ~max(., na.rm = TRUE),
+    mean = ~mean(., na.rm = TRUE),
+    std = ~sd(., na.rm = TRUE),
+    var = ~var(., na.rm = TRUE)
+  ))) %>%
+  pivot_longer(cols = everything(),
+               names_to = c("Feature", ".value"),
+               names_sep = "_")
+
+kable(stats, caption = "Basic Statistics of Numerical Features")
+
+```
+
+We visualize the distribution of each numerical variable.
+``` {r numerical_distribution, echo=FALSE, cache=FALSE}
+numerical_features <- names(data)[sapply(data, is.numeric)]
+
+ui <- fluidPage(
+  sidebarLayout(
+    mainPanel(
+      plotlyOutput("histogram_plot")
+    ),
+    sidebarPanel(
+      selectInput(
+        "plot_choice",
+        "Variable:",
+        choices = numerical_features
+      ),
+      sliderInput(
+        "binwidth_slider",
+        "Range (Slider):",
+        min = 0.01, max = 1000, value = 10, step = 0.01
+      ),
+      numericInput(
+        "binwidth_input",
+        "Range (Manual):",
+        value = 10,
+        min = 0.01,
+        max = 1000,
+        step = 0.01
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+
+  binwidth_value <- reactiveVal(10)  # Default value is 10
+  
+  observeEvent(input$binwidth_slider, {
+    binwidth_value(input$binwidth_slider)
+    updateNumericInput(session, "binwidth_input", value = input$binwidth_slider)
+  })
+  
+  observeEvent(input$binwidth_input, {
+    binwidth_value(input$binwidth_input)
+    updateSliderInput(session, "binwidth_slider", value = input$binwidth_input)
+  })
+  
+  output$histogram_plot <- renderPlotly({
+    p <- ggplot(data, aes_string(x = input$plot_choice)) +
+      geom_histogram(
+        binwidth = binwidth_value(),
+        fill = "darkblue",   
+        color = "black",     
+        alpha = 0.7,         
+        position = "identity"
+      ) +
+      labs(
+        title = paste("Histogram of", input$plot_choice),
+        x = input$plot_choice,
+        y = "Frequency"
+      ) +
+      theme_minimal()
+    
+    ggplotly(p)
+  })
+}
+
+shinyApp(ui = ui, server = server)
+```
+
+We show basic statistics of categorical features
+
+``` {r categorical_stats}
+categorical_stats <- data %>%
+  select(where(function(x) is.factor(x) | is.character(x))) %>%
+  summarise(across(everything(), ~n_distinct(.)))
+
+# Display the table
+kable(categorical_stats, caption = "Number of Unique Values in Categorical Features")
+```
+
+Wee can see that Working.Ion has distinctly fewest number of unique values, therefore, we may treat it like a factor
+
+``` {r as_factor}
+data$Working.Ion <- as.factor(data$Working.Ion)
+```
+
+We check frequency of each unique value in Working.Ion
+``` {r frequency_barplot, echo=FALSE}
+ggplot(data, aes(x = Working.Ion)) +
+  geom_bar(fill = "darkblue", color = "black", alpha = 0.7) +
+  geom_text(
+    stat = "count", aes(label = ..count..), vjust = -0.5, color = "black"
+  ) +
+  labs(
+    title = "Frequency of Working Ion Values",
+    x = "Working Ion",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+We can clearly see that among all unique classes the Li is the most common Working.Ion, while Cs and Rb are among the least frequent. It would suggest that in case of an experiment involving predicting such variable one should consider applying metrics which take into account the class imbalance, such as recall, precision and f1 score, not just simple accuracy. 
+
+We check for the existence of the outliers (based on numerical features).
+
+``` {r outliers1}
+
+numeric_cols <- sapply(data, is.numeric)
+outlier_count <- sapply(data[, numeric_cols], function(x) sum(abs(scale(x)) > 3))
+total_outliers <- sum(outlier_count)
+data <- data[apply(data[, numeric_cols], 1, function(row) all(abs(scale(row)) <= 3)), ]
+print(total_outliers)
+```
+
+Considering relatively low amount of outliers and their potential impact on any predictions I decided to remove them from the dataset. However, such decision should generally be consulted with the domain expert which can interpret the individual usefulness of given removed configurations.
+
+## 7. Correlations between the variables.
+
+We check the correlation between the basic numerical features.
+
+``` {r corr1, echo=FALSE, cache=TRUE}
+
+numerical_data <- data %>% select(where(is.numeric))
+
+correlation_matrix <- cor(numerical_data, use = "complete.obs")
+
+corrplot(correlation_matrix, 
+         method = 'color',       
+         order = 'AOE',          
+         type = 'full',          
+         tl.col = 'black',       
+         tl.srt = 45,            
+         addCoef.col = 'white',  
+         number.cex = 0.7,       
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         diag = FALSE)
+```
+
+Interpretation:
+
+High correlations:
+
+Stability.Charge and Stability.Discharge have a very strong positive correlation (0.86), indicating these features are closely related.
+Gravimetric.Capacity and Volumetric.Capacity (0.84) are also highly correlated, suggesting a strong dependency between them.
+Volumetric.Energy and Gravimetric.Energy (0.92) show a strong positive relationship.
+
+Moderate correlations:
+
+Atomic.Fraction.Discharge and Gravimetric.Capacity (0.65).
+Steps and Max.Voltage.Step (0.70).
+
+Weak/No correlations:
+
+Most other correlations are close to 0, suggesting weak or no linear relationship between those features.
+
+Negative correlations:
+
+Average.Voltage shows slight negative correlations with Volumetric.Capacity (-0.21) and other features, though the relationships are weak.
+
+Therefore, there are clusters of features that are strongly correlated (e.g., Stability, Capacity, Voltage-related metrics) and can potentially be reduced to fewer dimensions or studied together, while weakly correlated features may provide independent information.
+
+Detailed feature analysis can be conducted using the following interactive plot, plotting features against eachother:
+
+``` {r feature_plot, echo=FALSE}
+ui <- fluidPage(
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("var1", "Select First Variable:", choices = numerical_features),
+      selectInput("var2", "Select Second Variable:", choices = numerical_features)
+    ),
+
+    mainPanel(
+      plotlyOutput("scatter_plot")
+    )
+  )
+)
+
+server <- function(input, output) {
+
+  output$scatter_plot <- renderPlotly({
+    # Reactive data for selected variables
+    plot_data <- data.frame(
+      x = data[[input$var1]],
+      y = data[[input$var2]]
+    )
+
+    # Create scatter plot
+    p <- ggplot(plot_data, aes(x = x, y = y)) +
+      geom_point(color = "darkblue", alpha = 0.7) +
+      labs(
+        title = paste("Scatter Plot of", input$var1, "vs", input$var2),
+        x = input$var1,
+        y = input$var2
+      ) +
+      theme_minimal()
+
+    # Convert to plotly
+    ggplotly(p)
+  })
+}
+
+shinyApp(ui = ui, server = server)
+
+
+```
+
+We perform chi-square test for paris of categorical features
+
+``` {r chi_square, echo=FALSE, cache=TRUE}
+categorical_features <- names(data)[sapply(data, is.factor) | sapply(data, is.character)]
+chi_sq_results <- list()
+for (i in 1:(length(categorical_features) - 1)) {
+  for (j in (i + 1):length(categorical_features)) {
+    var1 <- categorical_features[i]
+    var2 <- categorical_features[j]
+    chi_sq_test <- chisq.test(table(data[[var1]], data[[var2]]))
+    chi_sq_results[[paste(var1, var2, sep = "_")]] <- chi_sq_test$p.value
+  }
+}
+
+chi_sq_results
+```
+
+The reults suggest very strong association between Battery.Formula and Working.Ion, Battery.Formula_Formula.Charge and Battery.Formula_Formula.Discharge as well as Working.Ion_Formula.Discharge and Formula.Charge_Formula.Discharge. However, there is no significant association between Working.Ion and Formula.Charge. A p-value of 1 means that these variables are likely independent of each other.
+
+## 8. and 9. Interactive plots and trends in the data.
+
+PCA (Principal Component Analysis) is a dimensionality reduction technique that transforms data into a smaller set of uncorrelated variables called principal components, while retaining as much variance as possible. It simplifies datasets by capturing the most important patterns and relationships, and it is what we are looking for here performing the visualization.
+
+PCA(n=3) plot of numerical features, color=Working.Ion type
+
+``` {r PCA}
+numerical_data <- data %>%
+  select(where(is.numeric))
+
+scaled_data <- scale(numerical_data)
+
+pca_result <- prcomp(scaled_data, center = TRUE, scale. = TRUE)
+
+pca_data <- as.data.frame(pca_result$x[, 1:3])
+pca_data$Working.Ion <- data$Working.Ion
+
+plot_ly(data = pca_data,
+        x = ~PC1, y = ~PC2, z = ~PC3,
+        color = ~Working.Ion,
+        colors = "Set1",
+        type = "scatter3d",
+        mode = "markers") %>%
+  layout(scene = list(xaxis = list(title = 'PC1'),
+                      yaxis = list(title = 'PC2'),
+                      zaxis = list(title = 'PC3')),
+         title = 'PCA of Numerical Data (Colored by Working.Ion)')
+
+```
+
+We can see that some Working.Ion types seem to be grouped, however the results cannot be easily interpreted since the points are relatively closely clustered together. 
+
+Violin plot of Working.Ion vs. Volumetric.Energy
+
+``` {r violin_plot}
+ggplot(data, aes(x = Working.Ion, y = Volumetric.Energy)) +
+  geom_violin(fill = "steelblue", alpha = 0.6) +
+  labs(
+    title = "Violin Plot of Volumetric Energy by Working Ion",
+    x = "Working Ion",
+    y = "Volumetric Energy"
+  ) +
+  theme_minimal()
+```
+
+We can plot the top n elements (by frequency) for each categorical variable.
+``` {r echo=FALSE}
+
+ui <- fluidPage(
+  sidebarLayout(
+    sidebarPanel(
+      selectInput(
+        "plot_choice", 
+        "Choose categorical variable:",
+        choices = c("Working.Ion", "Battery.Formula", "Formula.Charge", "Formula.Discharge")
+      ),
+      numericInput(
+        "top_n", 
+        "Number of top unique values:", 
+        value = 10, 
+        min = 1, 
+        max = 50
+      )
+    ),
+    mainPanel(
+      plotlyOutput("barplot")
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  output$barplot <- renderPlotly({
+    cat_data <- table(data[[input$plot_choice]])
+    top_cat_data <- head(sort(cat_data, decreasing = TRUE), input$top_n)
+    cat_df <- as.data.frame(top_cat_data)
+    colnames(cat_df) <- c("Category", "Count")
+  
+    p <- ggplot(cat_df, aes(x = reorder(Category, Count), y = Count)) +
+      geom_bar(stat = "identity", fill = "darkblue") +
+      coord_flip() +
+      labs(
+        title = paste("Top", input$top_n, "Categories of", input$plot_choice),
+        x = input$plot_choice,
+        y = "Frequency"
+      ) +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    ggplotly(p)
+  })
+}
+
+shinyApp(ui = ui, server = server)
+```
+
+## 10. Predictions of a single battery characteristic based on all other data
+
+I would like to test two prediction models:
+a) regressor predicting Volumetric.Capacity
+b) classifier predicting Working.Ion
+
+a) Regressor
+
+Data split
+``` {r regressor_training, cache=TRUE, echo=TRUE}
+X <- data %>% select(-Volumetric.Capacity)
+y <- data$Volumetric.Capacity
+
+inTraining <- createDataPartition(y = y, p = 0.75, list = FALSE)
+training <- data[inTraining,]
+testing <- data[-inTraining,]
+
+rf_model <- randomForest(Volumetric.Capacity ~ ., data = training, ntree = 100, importance = TRUE)
+predictions <- predict(rf_model, newdata = training)
+batteries_with_predictions <- cbind(training, Predicted.Volumetric.Capacity = predictions)
+test_predictions <- predict(rf_model, newdata = testing)
+
+rmse <- sqrt(mean((test_predictions - testing$Volumetric.Capacity)^2))
+cat("RMSE: ", rmse, "\n")
+mae <- mean(abs(test_predictions - testing$Volumetric.Capacity))
+cat("MAE: ", mae, "\n")
+print("Variable Importance:")
+varImpPlot(rf_model)
+
+datatable(batteries_with_predictions, options = list(scrollX = TRUE))
+
+```
+
+b) Classifier
+
+Data split
+``` {r classifier_training, cache=TRUE, echo=TRUE}
+
+battery_data <- data
+battery_data$Working.Ion <- factor(battery_data$Working.Ion)
+
+features <- battery_data %>% select(-Battery.Formula, -Working.Ion, -Formula.Discharge)
+
+target <- battery_data$Working.Ion
+complete_data <- na.omit(data.frame(features, target))  
+
+train_index <- createDataPartition(complete_data$target, p = 0.8, list = FALSE)
+train_data <- complete_data[train_index, ]
+test_data <- complete_data[-train_index, ]
+
+print("Categories in test data:")
+print(table(test_data$target))
+
+rf_model <- randomForest(target ~ ., data = train_data, ntree = 100, importance = TRUE)
+
+test_predictions <- predict(rf_model, newdata = test_data)
+
+print("Comparison of actual vs predicted values:")
+comparison_df <- data.frame(
+  Actual = test_data$target,
+  Predicted = test_predictions
+)
+print(head(comparison_df, 20))
+
+conf_matrix <- table(Predicted = test_predictions, Actual = test_data$target)
+
+conf_matrix_percent <- sweep(conf_matrix, 2, colSums(conf_matrix), '/')
+
+corrplot(as.matrix(conf_matrix_percent), 
+         method = 'color',       
+         type = 'upper',          
+         tl.col = 'black',       
+         tl.srt = 45,            
+         addCoef.col = 'black',  
+         number.cex = 0.7,       
+         col = colorRampPalette(c("white", "lightblue", "darkblue"))(100),
+         is.corr = FALSE,   
+         addgrid.col = 'gray',
+         number.digits = 2,     
+         title = "Confusion Matrix Heatmap (Normalized by Actual Class)",
+         mar = c(0,0,2,0))      
+
+conf_matrix_long <- as.data.frame(as.table(conf_matrix))
+names(conf_matrix_long) <- c("Predicted", "Actual", "Count")
+
+ggplot(conf_matrix_long, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile() +
+  geom_text(aes(label = Count), 
+            size = 4, color = "black") +
+  scale_fill_gradient(low = "white", high = "darkblue") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(hjust = 0.5, size = 14)
+  ) +
+  labs(
+    title = "Confusion Matrix",
+    x = "Actual Class",
+    y = "Predicted Class",
+    fill = "Count"
+  )
+
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+
+class_metrics <- data.frame(
+  Class = colnames(conf_matrix),
+  Precision = NA,
+  Recall = NA,
+  F1_Score = NA
+)
+
+for(i in 1:ncol(conf_matrix)) {
+  TP <- conf_matrix[i,i]
+  FP <- sum(conf_matrix[,i]) - TP
+  FN <- sum(conf_matrix[i,]) - TP
+  
+  precision <- TP / (TP + FP)
+  recall <- TP / (TP + FN)
+  f1 <- 2 * (precision * recall) / (precision + recall)
+  
+  class_metrics$Precision[i] <- precision
+  class_metrics$Recall[i] <- recall
+  class_metrics$F1_Score[i] <- f1
+}
+
+macro_precision <- mean(class_metrics$Precision)
+macro_recall <- mean(class_metrics$Recall)
+macro_f1 <- mean(class_metrics$F1_Score)
+
+cat("Overall Accuracy:", round(accuracy * 100, 2), "%\n\n")
+
+print("Per-class metrics:")
+class_metrics_rounded <- round(class_metrics[,2:4] * 100, 2)
+class_metrics_rounded <- cbind(Class = class_metrics$Class, class_metrics_rounded)
+print(class_metrics_rounded)
+
+TP_total <- sum(diag(conf_matrix))
+FP_total <- sum(conf_matrix) - TP_total
+micro_precision <- TP_total / sum(conf_matrix)
+micro_recall <- TP_total / sum(conf_matrix)
+micro_f1 <- 2 * (micro_precision * micro_recall) / (micro_precision + micro_recall)
+
+cat("\nMicro-averaged metrics:\n")
+cat("Precision:", round(micro_precision * 100, 2), "%\n")
+cat("Recall:", round(micro_recall * 100, 2), "%\n")
+cat("F1 Score:", round(micro_f1 * 100, 2), "%\n")
+
+predictions <- predict(rf_model, newdata = features)
+result_data <- battery_data
+result_data <- cbind(Predicted.Working.Ion = as.character(predictions), battery_data)
+
+print("Variable Importance:")
+varImpPlot(rf_model)
+
+datatable(result_data, options = list(scrollX = TRUE))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
